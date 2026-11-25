@@ -1,0 +1,61 @@
+name: Deploy
+
+# Manual only: nothing deploys on push or merge.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy" to confirm'
+        required: true
+
+permissions:
+  contents: read
+  id-token: write # lets the job request a GitHub OIDC token; no AWS keys are stored in the repo
+
+concurrency:
+  group: deploy-ledger-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event.inputs.confirm == 'deploy' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # This `if` is convenience only: a branch can edit it. The real gate is the `production`
+    # environment (deployment branches: main only, required reviewers) plus the OIDC trust
+    # policy pinned to ref + workflow file. See docs/github-oidc-role.md.
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+      - name: Assume deploy role via GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: ledger-api-deploy-${{ github.run_id }}
+
+      - name: cdk diff + deploy
+        # Values go through env vars, never interpolated straight into the script.
+        env:
+          CORS_ORIGINS: ${{ vars.CORS_ORIGINS }}
+          BUDGET_EMAIL: ${{ vars.BUDGET_EMAIL }}
+          JWT_ISSUER: ${{ vars.JWT_ISSUER }}
+          JWT_AUDIENCE: ${{ vars.JWT_AUDIENCE }}
+        run: |
+          # Deploys always carry a JWT authorizer; there is no unauthenticated path from CI.
+          if [ -z "$JWT_ISSUER" ] || [ -z "$JWT_AUDIENCE" ]; then
+            echo "::error::Set the JWT_ISSUER and JWT_AUDIENCE repository variables before deploying." >&2
+            exit 1
+          fi
+          ARGS=(--context "jwtIssuer=$JWT_ISSUER" --context "jwtAudience=$JWT_AUDIENCE")
+          ARGS+=(--context "corsOrigins=${CORS_ORIGINS:-http://localhost:5173}")
+          if [ -n "$BUDGET_EMAIL" ]; then ARGS+=(--context "budgetEmail=$BUDGET_EMAIL"); fi
+          npx cdk diff LedgerApi "${ARGS[@]}"
+          npx cdk deploy LedgerApi --require-approval never "${ARGS[@]}"

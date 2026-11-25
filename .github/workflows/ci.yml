@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-synth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      # Synth needs no AWS credentials: the stack is environment-agnostic until deploy.
+      # cdk-nag runs as a validation plugin, so any unacknowledged finding fails this step.
+      # The default synth requires a JWT issuer; a placeholder is fine because nothing deploys here.
+      - run: npm run synth
+      - run: npm run synth:demo
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cdk-out
+          path: cdk.out
+          retention-days: 7
+
+  dynamodb-local:
+    # Concurrency, condition-expression and property tests against a real DynamoDB engine.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      dynamodb:
+        image: amazon/dynamodb-local:latest
+        ports:
+          - 8000:8000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:integration
+        env:
+          DYNAMODB_ENDPOINT: http://localhost:8000
