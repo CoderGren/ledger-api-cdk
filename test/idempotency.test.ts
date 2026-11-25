@@ -32,7 +32,7 @@ describe('L-M4: POST /accounts honors Idempotency-Key', () => {
   });
 
   it('over HTTP: 201 then 200 with the same id and idempotent-replayed: true', async () => {
-    const routes = createRoutes(makeService().service);
+    const routes = createRoutes(makeService().service, { authMode: 'none' });
     const ev = { headers: { 'idempotency-key': 'acct-key-0001' }, body: '{"name":"A"}', isBase64Encoded: false } as unknown as HttpEvent;
     const r1 = await routes.createAccount(ev);
     const r2 = await routes.createAccount(ev);
@@ -56,7 +56,7 @@ describe('idempotency keys are scoped per caller', () => {
 
   it('JWT sub from the authorizer context becomes the scope', async () => {
     const { service, repo } = makeService();
-    const routes = createRoutes(service);
+    const routes = createRoutes(service, { authMode: 'jwt' });
     const ev = {
       headers: { 'idempotency-key': 'jwt-key-0001' },
       body: '{"name":"A"}',

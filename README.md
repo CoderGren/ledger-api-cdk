@@ -22,11 +22,11 @@ in **TypeScript with AWS CDK v2**.
 | **Money correctness** | Integer minor units only (no floats), overflow-checked arithmetic, every transaction's entries sum to zero, customer accounts can never go negative. |
 | **Atomicity** | Each posting is one DynamoDB `TransactWriteItems` call: idempotency record, transaction, both balance updates (with conditional guards), statement rows and the reversal marker item all land together or not at all. |
 | **Idempotency** | `Idempotency-Key` header is required on writes. Same key + same body replays the original result (`200`, `idempotent-replayed: true`); same key + different body is a `409`. Keys are scoped per caller and honored for 7 days; see [Idempotency](#idempotency). |
-| **Reversals** | A reversal posts the mirror-image entries, links to the original, and can happen exactly once (an insert-only `REVERSAL` marker item; the original transaction is never mutated). |
-| **Auth and ownership** | API Gateway JWT authorizer (Cognito or any OIDC issuer) on every route. Accounts belong to the caller's JWT `sub`: other callers get `404` on reads, debits and reversals; anyone can be paid by account id. |
+| **Reversals** | A reversal posts the mirror-image entries, links to the original, and can happen exactly once (an insert-only `REVERSAL` marker item; the original transaction is never mutated). See [Who can reverse a transfer](#who-can-reverse-a-transfer). |
+| **Auth and ownership** | API Gateway JWT authorizer (Cognito or any OIDC issuer) on every route. Accounts belong to the caller's JWT `sub`: other callers get `404` on reads, debits and reversals; anyone can be paid by account id. Auth fails closed: with the authorizer on, a token without `sub` is a `401`, never the demo's `anon` user. |
 | **Testing depth** | Domain unit tests, handler tests, DynamoDB adapter tests (mocked SDK), **property-based tests** (fast-check) that run random sequences of transfers, reversals and replays and check the books still balance, plus **CDK assertion tests** for the infrastructure. |
 | **Least privilege** | One Lambda and one hand-written IAM role per route. Read routes get `GetItem`/`Query` only, and every statement is pinned to the key prefixes the route touches with `dynamodb:LeadingKeys` (for example `UpdateItem` only on `ACCOUNT#*`, so a posting Lambda can move a balance but never overwrite an account). No wildcards, no deletes, no managed policies. Logs only to the function's own log group. |
-| **Secure, cheap defaults** | On-demand DynamoDB, KMS encryption, point-in-time recovery, deletion protection, 30-day log retention, stage throttling, CORS allow-list, 5xx alarm, AWS Budgets alert. |
+| **Secure, cheap defaults** | On-demand DynamoDB, KMS encryption, point-in-time recovery, deletion protection, 30-day log retention, stage throttling, CORS allow-list, a 5xx CloudWatch alarm (state only, see below), AWS Budgets email alert. |
 | **Compliance as code** | [cdk-nag](https://github.com/cdklabs/cdk-nag) `AwsSolutions` pack runs on every synth; the only acknowledgements are documented in code. |
 | **Keyless CI/CD** | GitHub Actions assumes an AWS role through **GitHub OIDC**. No AWS keys are stored anywhere. Deploys are manual-dispatch only, behind a GitHub environment. |
 
@@ -45,7 +45,7 @@ flowchart LR
   fList -->|GetItem, Query| ddb
   fXfer -->|TransactWriteItems| ddb
   fRev -->|TransactWriteItems| ddb
-  api -. 5xx metric .-> alarm["CloudWatch alarm"]
+  api -. 5xx metric .-> alarm["CloudWatch alarm<br/>(no action attached)"]
   budget["AWS Budgets<br/>80% actual / 100% forecast"] -.-> email["Alert email"]
   gha["GitHub Actions"] -->|OIDC AssumeRoleWithWebIdentity| role["Deploy role"] --> cfn["CloudFormation (CDK)"]
 ```
@@ -108,8 +108,12 @@ Every `POST` (accounts, transfers, reversals) needs an `Idempotency-Key` header 
 - **Races.** Concurrent requests with the same key are resolved by the conditional put on the
   idempotency item; the loser replays the winner's result. Contended writes (DynamoDB
   `TransactionConflict`) are retried server-side up to 3 times with backoff before surfacing as
-  `409 CONCURRENT_UPDATE`, and each `TransactWriteItems` carries a `ClientRequestToken` derived from
-  `sha256(scope | key | request fingerprint)`, so SDK-level retries are idempotent too.
+  `409 CONCURRENT_UPDATE`. Each `TransactWriteItems` carries a `ClientRequestToken` derived from
+  `sha256(scope | key | request fingerprint | transaction or account id)`. SDK-level retries of one
+  attempt resend the same token; a rebuilt retry has a new id and so a fresh token, which avoids
+  DynamoDB's 10-minute `IdempotentParameterMismatch` window. DynamoDB Local doesn't emulate
+  `ClientRequestToken` or real `TransactionConflict` timing, so that part is covered by unit tests
+  only.
 
 | Method | Path | Body | Success |
 | --- | --- | --- | --- |
@@ -119,15 +123,34 @@ Every `POST` (accounts, transfers, reversals) needs an `Idempotency-Key` header 
 | `POST` | `/transfers` | `{ "fromAccountId", "toAccountId", "amountCents", "memo"? }` | `201` transaction (`200` on replay) |
 | `POST` | `/transactions/{transactionId}/reversal` | | `201` reversal transaction |
 
-Errors are `{"error": {"code", "message"}}` with `400 VALIDATION`, `404 NOT_FOUND`,
+Errors are `{"error": {"code", "message"}}` with `400 VALIDATION`, `401 UNAUTHENTICATED`, `404 NOT_FOUND`,
 `409 IDEMPOTENCY_CONFLICT | ALREADY_REVERSED | CONCURRENT_UPDATE`,
 `422 INSUFFICIENT_FUNDS | CURRENCY_MISMATCH`. Unexpected errors return a generic `500`
 without internals.
 
+### Who can reverse a transfer
+
+`POST /transactions/{id}/reversal` is a **payer-initiated correction**, and the rules are exactly
+what the code enforces:
+
+- **Who:** only the owner of the account that was *debited* (the payer). The payee and everyone
+  else get `404`, the same as for an account they don't own.
+- **When:** at any time; there is no time window.
+- **How often:** once. A second reversal is `409 ALREADY_REVERSED`, and a reversal can't itself be
+  reversed (`400 VALIDATION`).
+- **Limits:** the reversal debits the payee, so it fails with `422 INSUFFICIENT_FUNDS` if they no
+  longer hold the money. It never overdraws a customer account.
+
+That means a payer can pull money back out of someone else's account until it has been spent.
+It suits a demo of the mechanics. A production ledger would put reversals behind an operator role
+or a dispute flow with a time window.
+
 Funding/clearing accounts (`allowNegative: true`, where money enters the ledger) are **never
 created through the API**. An operator creates them out of band with their own IAM credentials:
-`npx tsx bin/seed.ts --table <TableName> --name "Incoming wires" --owner sub:<user-id>` (the owner
-is the JWT `sub` allowed to move money out of it; `anon` for a local unauthenticated demo). That keeps the invariant
+`npx tsx bin/seed.ts --table <TableName> --name "Incoming wires" --owner sub:<user-id>`. The owner
+is the JWT `sub` allowed to move money out of it, and it is required: there is no default.
+`anon` is refused unless you also pass `--allow-anon-owner`, which only makes sense for a local
+unauthenticated demo. That keeps the invariant
 **sum of all balances = 0** meaningful: no caller can mint money from a self-made account.
 
 ## Run it locally
@@ -209,6 +232,7 @@ bin/seed.ts                   out-of-band funding account creation (operator cre
 
 - **Runtime:** Lambdas use `nodejs24.x`. AWS deprecated `nodejs20.x` on 2026-04-30, and cdk-nag's latest-runtime rule is acknowledged for 24.x in code because it matches the CI toolchain.
 - **Auth:** a JWT authorizer is attached by default, and the deploy workflow fails without `JWT_ISSUER`/`JWT_AUDIENCE`. The unauthenticated mode exists only for private local/sandbox demos and is the only place `AwsSolutions-APIG4` is acknowledged. In that mode every caller is `anon`, so the demo is single-tenant by design.
+- **The 5xx alarm notifies no one.** It changes state in CloudWatch (and shows on dashboards), but no SNS action is attached, so nobody is paged. Wiring it to an SNS topic or an incident tool is a deliberate per-environment choice; only the Budgets alert sends email.
 - **Balances on the account item** make balance reads a single `GetItem`. The trade-off is a write hot spot on very busy accounts; at higher scale, sharded balance counters or a stream-built projection would take over.
 - **Currencies** are per account and transfers must be same-currency; FX would be a separate transaction with two currency legs.
 

@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { LedgerError } from '../src/domain/errors.js';
 import { MAX_BALANCE_CENTS } from '../src/domain/money.js';
 import type { Transaction } from '../src/domain/ledger.js';
-import { decodeCursor, DynamoDbLedgerRepository, encodeCursor, mapCancellation } from '../src/store/dynamodb-repository.js';
+import { clientRequestToken, decodeCursor, DynamoDbLedgerRepository, encodeCursor, mapCancellation } from '../src/store/dynamodb-repository.js';
 
 const ddb = mockClient(DynamoDBDocumentClient);
 const repo = new DynamoDbLedgerRepository(DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'us-east-1' })), 'Ledger');
@@ -108,6 +108,13 @@ describe('DynamoDbLedgerRepository', () => {
     expect(items.map((i) => i.Put!.Item!.PK)).toEqual(['IDEMPOTENCY#sub:u1#key-00001', 'ACCOUNT#a']);
     expect(mapCancellation(cancelled(['ConditionalCheckFailed', 'None']))).toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
     expect(mapCancellation(cancelled(['None', 'TransactionConflict']))).toMatchObject({ code: 'CONCURRENT_UPDATE' });
+  });
+
+  it('L-N2: the ClientRequestToken is per attempt (includes the resource id), so a rebuilt retry gets a fresh one', () => {
+    const t1 = clientRequestToken(idem);
+    expect(clientRequestToken({ ...idem })).toBe(t1); // SDK retry of the same attempt: same token
+    expect(clientRequestToken({ ...idem, resourceId: 't1-retry' })).not.toBe(t1); // rebuilt attempt: new token
+    expect(clientRequestToken({ ...idem, scope: 'sub:other' })).not.toBe(t1);
   });
 
   it('treats a same-token mismatch from DynamoDB as a retryable same-key race', () => {

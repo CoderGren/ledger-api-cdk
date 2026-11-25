@@ -31,9 +31,17 @@ export const keys = {
 /** An idempotency record blocks a new write only while it is unexpired. */
 const CLAIM_KEY_CONDITION = 'attribute_not_exists(PK) OR expiresAt <= :now';
 
-/** DynamoDB's own 10-minute request idempotency, derived from the caller-scoped key and request. */
-function clientRequestToken(idem: IdempotencyRecord): string {
-  return createHash('sha256').update(`${idem.scope}|${idem.key}|${idem.fingerprint}`).digest('hex').slice(0, 36);
+/**
+ * Token for DynamoDB's own 10-minute TransactWriteItems idempotency.
+ *
+ * It includes the resource id (transaction or account id), which is fixed for one attempt:
+ * SDK-internal retries resend identical parameters, so they stay idempotent. A service-level
+ * retry rebuilds the write with a new id and timestamp, so it gets a fresh token. Reusing the old
+ * token with different parameters would make DynamoDB answer IdempotentParameterMismatch (a 409)
+ * for up to 10 minutes. Duplicate requests are still caught by the conditional idempotency item.
+ */
+export function clientRequestToken(idem: IdempotencyRecord): string {
+  return createHash('sha256').update(`${idem.scope}|${idem.key}|${idem.fingerprint}|${idem.resourceId}`).digest('hex').slice(0, 36);
 }
 
 function idempotencyPut(tableName: string, idem: IdempotencyRecord, nowEpochSeconds: number): TransactItem {

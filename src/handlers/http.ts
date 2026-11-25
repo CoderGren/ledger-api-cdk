@@ -35,15 +35,32 @@ export function header(event: HttpEvent, name: string): string | undefined {
 }
 
 /**
- * The authenticated principal (JWT `sub`) when an authorizer is attached, else `anon`.
- * Scopes idempotency keys (and, with auth on, account ownership) per caller.
+ * `jwt`: the API Gateway JWT authorizer is attached (the default for deployed stacks).
+ * `none`: the explicit `allowUnauthenticated` demo mode, where every caller is `anon`.
  */
-export function callerOf(event: HttpEvent): Caller {
+export type AuthMode = 'jwt' | 'none';
+
+/** Reads AUTH_MODE (set by the stack). Anything other than exactly `jwt` or `none` fails closed. */
+export function parseAuthMode(raw: string | undefined): AuthMode {
+  if (raw === 'jwt' || raw === 'none') return raw;
+  throw new Error(`AUTH_MODE must be "jwt" or "none", got ${JSON.stringify(raw)}`);
+}
+
+/**
+ * The caller's principal, which scopes idempotency keys and owns accounts.
+ * In `jwt` mode it is the token's `sub`; a token without one is rejected with 401 and NEVER
+ * falls back to `anon` (fail closed). Only the explicit `none` demo mode uses `anon`.
+ */
+export function callerOf(event: HttpEvent, mode: AuthMode): Caller {
+  if (mode === 'none') return ANONYMOUS;
   const ctx = event.requestContext as
     | (HttpEvent['requestContext'] & { authorizer?: { jwt?: { claims?: Record<string, unknown> } } })
     | undefined;
   const sub = ctx?.authorizer?.jwt?.claims?.sub;
-  return typeof sub === 'string' && sub.length > 0 ? { principal: `sub:${sub}` } : ANONYMOUS;
+  if (typeof sub !== 'string' || sub.trim() === '') {
+    throw new LedgerError('UNAUTHENTICATED', 'token has no subject (sub) claim');
+  }
+  return { principal: `sub:${sub}` };
 }
 
 /** Wraps a route so domain errors become JSON problem responses and nothing else leaks. */

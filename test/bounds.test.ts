@@ -11,7 +11,7 @@ const post = (json: unknown, key: string) =>
 describe('L-M2: amount and balance bounds', () => {
   it('rejects transfers above MAX_TRANSFER_CENTS with 400, not 500 (9e15 repro)', async () => {
     const { service } = makeService();
-    const routes = createRoutes(service);
+    const routes = createRoutes(service, { authMode: 'none' });
     const funding = (await service.createFundingAccount({ name: 'F' })).id;
     const a = (await service.createAccount({ name: 'A' }, newKey())).account.id;
     for (const amountCents of [MAX_TRANSFER_CENTS + 1, 9_007_199_254_740_991, Number.MAX_SAFE_INTEGER]) {
@@ -25,7 +25,7 @@ describe('L-M2: amount and balance bounds', () => {
 
   it('refuses to push any balance past MAX_BALANCE_CENTS, including funding accounts, with 400', async () => {
     const { service, repo } = makeService();
-    const routes = createRoutes(service);
+    const routes = createRoutes(service, { authMode: 'none' });
     const funding = (await service.createFundingAccount({ name: 'F' })).id;
     const a = (await service.createAccount({ name: 'A' }, newKey())).account.id;
     // Put both accounts right at the edge without 100k transfers.
@@ -49,7 +49,7 @@ describe('L-M2: amount and balance bounds', () => {
         fc.integer({ min: 0, max: 50 }),
         async (amounts, headroom) => {
           const { service, repo } = makeService();
-          const routes = createRoutes(service);
+          const routes = createRoutes(service, { authMode: 'none' });
           const funding = (await service.createFundingAccount({ name: 'F' })).id;
           const a = (await service.createAccount({ name: 'A' }, newKey())).account.id;
           repo.accounts.get(funding)!.balanceCents = -(MAX_BALANCE_CENTS - headroom * MAX_TRANSFER_CENTS);

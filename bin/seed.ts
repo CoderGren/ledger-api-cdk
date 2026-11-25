@@ -5,32 +5,25 @@
  * This is deliberately NOT an API route: only an operator with IAM write access to the table
  * (their own short-lived credentials) can create accounts that are allowed to go negative.
  *
- *   npx tsx bin/seed.ts --table <TableName output> --name "Incoming wires" [--currency USD] [--owner sub:<user-id>]
+ *   npx tsx bin/seed.ts --table <TableName output> --name "Incoming wires" --owner sub:<jwt-sub> [--currency USD]
  *
- * `--owner` is the principal allowed to move money out of it: `sub:<JWT sub>` with the authorizer
- * on, or `anon` (default) for a local/unauthenticated demo.
+ * `--owner` is required (see bin/seed-args.ts): it is the only principal that can move money
+ * out of the account. `anon` needs --allow-anon-owner and is for a local unauthenticated demo.
  */
-import { parseArgs } from 'node:util';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { LedgerService } from '../src/domain/service.js';
 import { DynamoDbLedgerRepository } from '../src/store/dynamodb-repository.js';
+import { parseSeedArgs, SEED_USAGE, SeedArgsError } from './seed-args.js';
 
-const { values } = parseArgs({
-  options: {
-    table: { type: 'string' },
-    name: { type: 'string' },
-    currency: { type: 'string', default: 'USD' },
-    endpoint: { type: 'string' },
-    owner: { type: 'string', default: 'anon' },
-  },
-});
-
-if (!values.table || !values.name) {
-  console.error('usage: npx tsx bin/seed.ts --table <TableName> --name <account name> [--currency USD] [--owner sub:<id>|anon] [--endpoint http://localhost:8000]');
+let args;
+try {
+  args = parseSeedArgs(process.argv.slice(2), process.env);
+} catch (err) {
+  console.error(`${err instanceof SeedArgsError ? err.message : String(err)}\n${SEED_USAGE}`);
   process.exit(2);
 }
 
-const client = new DynamoDBClient(values.endpoint ? { endpoint: values.endpoint } : {});
-const service = new LedgerService({ repo: new DynamoDbLedgerRepository(client, values.table) });
-const account = await service.createFundingAccount({ name: values.name, currency: values.currency }, values.owner);
+const client = new DynamoDBClient(args.endpoint ? { endpoint: args.endpoint } : {});
+const service = new LedgerService({ repo: new DynamoDbLedgerRepository(client, args.table) });
+const account = await service.createFundingAccount({ name: args.name, currency: args.currency }, args.owner);
 console.error(JSON.stringify(account));

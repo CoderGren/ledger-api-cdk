@@ -5,7 +5,8 @@ export type LedgerErrorCode =
   | 'CURRENCY_MISMATCH'
   | 'IDEMPOTENCY_CONFLICT'
   | 'ALREADY_REVERSED'
-  | 'CONCURRENT_UPDATE';
+  | 'CONCURRENT_UPDATE'
+  | 'UNAUTHENTICATED';
 
 const STATUS: Record<LedgerErrorCode, number> = {
   VALIDATION: 400,
@@ -15,6 +16,7 @@ const STATUS: Record<LedgerErrorCode, number> = {
   IDEMPOTENCY_CONFLICT: 409,
   ALREADY_REVERSED: 409,
   CONCURRENT_UPDATE: 409,
+  UNAUTHENTICATED: 401,
 };
 
 export class LedgerError extends Error {

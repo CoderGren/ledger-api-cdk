@@ -143,7 +143,8 @@ export class LedgerStack extends Stack {
       corsPreflight: {
         allowOrigins: props.corsOrigins,
         allowMethods: [apigw.CorsHttpMethod.GET, apigw.CorsHttpMethod.POST, apigw.CorsHttpMethod.OPTIONS],
-        allowHeaders: ['content-type', 'idempotency-key'],
+        // `authorization` carries the bearer token for the JWT authorizer.
+        allowHeaders: ['authorization', 'content-type', 'idempotency-key'],
         exposeHeaders: ['idempotent-replayed', 'location'],
         maxAge: Duration.hours(1),
       },
@@ -168,7 +169,7 @@ export class LedgerStack extends Stack {
     });
 
     for (const spec of ROUTES) {
-      const fn = this.createRouteFunction(spec);
+      const fn = this.createRouteFunction(spec, 'jwt' in props.auth ? 'jwt' : 'none');
       this.functions[spec.handler] = fn;
       this.api.addRoutes({
         path: spec.path,
@@ -177,6 +178,7 @@ export class LedgerStack extends Stack {
       });
     }
 
+    // State-only alarm: no action is attached, so it notifies no one (see README, design notes).
     new cloudwatch.Alarm(this, 'Api5xxAlarm', {
       alarmDescription: 'Ledger API is returning 5xx responses',
       metric: new cloudwatch.Metric({
@@ -206,7 +208,7 @@ export class LedgerStack extends Stack {
     }
   }
 
-  private createRouteFunction(spec: RouteSpec): nodejs.NodejsFunction {
+  private createRouteFunction(spec: RouteSpec, authMode: 'jwt' | 'none'): nodejs.NodejsFunction {
     const logGroup = new logs.LogGroup(this, `${spec.id}Logs`, {
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: RemovalPolicy.DESTROY,
@@ -248,6 +250,8 @@ export class LedgerStack extends Stack {
       logGroup,
       environment: {
         TABLE_NAME: this.table.tableName,
+        // Handlers reject tokens without `sub` in jwt mode; `none` only in the explicit demo mode.
+        AUTH_MODE: authMode,
         NODE_OPTIONS: '--enable-source-maps',
       },
       bundling: {

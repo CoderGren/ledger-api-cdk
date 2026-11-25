@@ -26,7 +26,7 @@ let routes: ReturnType<typeof createRoutes>;
 let service: ReturnType<typeof makeService>['service'];
 beforeEach(() => {
   service = makeService().service;
-  routes = createRoutes(service);
+  routes = createRoutes(service, { authMode: 'none' });
 });
 
 async function account(name: string): Promise<string> {
@@ -108,7 +108,7 @@ describe('HTTP routes', () => {
 
   it('hides unexpected errors behind a generic 500', async () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const broken = createRoutes({ getBalance: async () => { throw new Error('secret internals'); } } as never);
+    const broken = createRoutes({ getBalance: async () => { throw new Error('secret internals'); } } as never, { authMode: 'none' });
     const res = await broken.getBalance(event({ pathParameters: { accountId: 'a' } }));
     expect(res.statusCode).toBe(500);
     expect(res.body).not.toContain('secret internals');

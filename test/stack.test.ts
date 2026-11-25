@@ -124,6 +124,10 @@ describe('LedgerStack', () => {
     template.hasResourceProperties('AWS::ApiGatewayV2::Api', {
       CorsConfiguration: { AllowOrigins: ['http://localhost:5173'], AllowHeaders: Match.arrayWith(['idempotency-key']) },
     });
+    // L-N3: browsers must be allowed to send the bearer token through CORS preflight.
+    template.hasResourceProperties('AWS::ApiGatewayV2::Api', {
+      CorsConfiguration: { AllowHeaders: ['authorization', 'content-type', 'idempotency-key'] },
+    });
   });
 
   it('has a 5xx alarm and a monthly cost budget with email alerts', () => {
@@ -145,12 +149,15 @@ describe('LedgerStack', () => {
     const routes = Object.values(template.findResources('AWS::ApiGatewayV2::Route')) as Array<{ Properties: { AuthorizationType?: string } }>;
     expect(routes).toHaveLength(5);
     for (const r of routes) expect(r.Properties.AuthorizationType).toBe('JWT');
+    // L-N1: handlers know the authorizer is on, so a token without `sub` is a 401, never `anon`.
+    template.allResourcesProperties('AWS::Lambda::Function', { Environment: { Variables: Match.objectLike({ AUTH_MODE: 'jwt' }) } });
   });
 
   it('L-M3: the unauthenticated demo is an explicit opt-in, and still nag-clean only via a documented acknowledgement', () => {
     const app = makeApp();
     const t = Template.fromStack(new LedgerStack(app, 'Demo', { ...props, auth: { unauthenticated: true } }));
     t.resourceCountIs('AWS::ApiGatewayV2::Authorizer', 0);
+    t.allResourcesProperties('AWS::Lambda::Function', { Environment: { Variables: Match.objectLike({ AUTH_MODE: 'none' }) } });
     const app2 = makeApp();
     new LedgerStack(app2, 'DemoNag', { ...props, auth: { unauthenticated: true } });
     Validations.of(app2).addPlugins(new AwsSolutionsChecks(app2));
